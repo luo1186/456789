@@ -2,8 +2,7 @@ from datetime import datetime, timedelta
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
-import jwt, os
+import bcrypt, jwt, os
 
 import models
 from database import get_db
@@ -12,14 +11,13 @@ SECRET = os.environ.get("SECRET_KEY", "reconcore-secret-change-in-prod-2024")
 ALGORITHM = "HS256"
 EXPIRE_HOURS = 24 * 7
 
-pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer = HTTPBearer(auto_error=False)
 
 def hash_password(plain: str) -> str:
-    return pwd.hash(plain)
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 def create_token(user_id: int, role: str) -> str:
     payload = {

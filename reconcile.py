@@ -177,14 +177,14 @@ def _reconcile(task_id: str, file_paths: dict, result_dir: str, task_name: str):
             is_anomaly = False
 
             if r_qty is None:
-                errors.append(f"收货单中未找到品名"{key}"")
+                errors.append(f"收货单中未找到品名[{key}]")
                 is_anomaly = True
             elif abs(r_qty - s_qty) > 0.001:
                 errors.append(f"数量差异：收货单{r_qty} vs 对账单{s_qty}")
                 is_anomaly = True
 
             if p_price is None:
-                errors.append(f"采购单中未找到品名"{key}"")
+                errors.append(f"采购单中未找到品名[{key}]")
                 is_anomaly = True
             elif abs(p_price - s_price) > 0.001:
                 errors.append(f"单价差异：采购单¥{p_price} vs 对账单¥{s_price}")

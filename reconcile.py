@@ -6,7 +6,7 @@
   3. 含税/不含税单价智能优先
 关联键：采购单号 + 品名
 """
-import os, json, datetime, traceback
+import os, json, datetime, traceback, re
 import pandas as pd
 import numpy as np
 from openpyxl import load_workbook, Workbook
@@ -80,6 +80,10 @@ def _find_header_row(all_rows: list, needed_keys: list) -> int:
         )
         if score > best_score:
             best_score, best_idx = score, ri
+    # 如果下一行和表头行内容完全一样（双表头），跳过重复行
+    if best_idx + 1 < len(all_rows):
+        if all_rows[best_idx][:5] == all_rows[best_idx + 1][:5]:
+            best_idx += 1
     return best_idx
 
 
@@ -197,6 +201,13 @@ def _get_po_price(prow) -> tuple:
     return None, "未找到"
 
 
+def _clean_po_no(v) -> str:
+    """清洗采购单号：去掉PO编号后面的中文后缀，如 PO251223012运营B → PO251223012"""
+    s = _to_str(v)
+    m = re.match(r'([A-Za-z]+[0-9]+[A-Za-z0-9-]*)', s)
+    return m.group(1) if m else s
+
+
 def _ffill_po_no(df: pd.DataFrame) -> pd.DataFrame:
     """
     关键修复：采购单合并单元格导致采购单号出现NaN
@@ -232,7 +243,7 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
 
     # 清洗字符串
     for df in (po_df, recv_df, stmt_df):
-        df["采购单号"] = df["采购单号"].apply(_to_str)
+        df["采购单号"] = df["采购单号"].apply(_clean_po_no)
         df["品名"]     = df["品名"].apply(_to_str)
     po_df   = po_df[po_df["采购单号"] != ""].copy()
     recv_df = recv_df[recv_df["采购单号"] != ""].copy()

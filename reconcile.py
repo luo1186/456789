@@ -1,8 +1,10 @@
 """
-核心对账引擎 v3 — 含税/不含税单价智能识别版
+核心对账引擎 v4
+修复：
+  1. 采购单合并单元格 → 自动向下填充采购单号
+  2. 收货单「关联单据号」→ 识别为采购单号
+  3. 含税/不含税单价智能优先
 关联键：采购单号 + 品名
-单价逻辑：含税单价有值优先，否则用单价列
-三步比对：行数 → 数量+单价 → 总额
 """
 import os, json, datetime, traceback
 import pandas as pd
@@ -28,26 +30,20 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="CCCCCC"),
 )
 
-# ── 列名关键字映射 ────────────────────────────────────
 COL_KEYWORDS = {
-    "采购单号":  ["采购单号","采购单","订单号","采购编号","PO号","PO_NO","po_no","PONO","采购订单"],
+    # 采购单号：收货单里叫「关联单据号」也要识别
+    "采购单号":  ["采购单号","采购单","关联单据号","订单号","采购编号","PO号","PO_NO","po_no","PONO","采购订单"],
     "品名":      ["品名","品名/规格","物料名称","物料描述","商品名称","货品名","名称","产品名","品种","货描"],
     "含税单价":  ["含税单价","含税价","税含单价","含增值税单价","价税合一单价"],
     "单价":      ["单价","采购单价","结算单价","price","Price","unit_price","不含税单价","未税单价"],
-    "数量":      ["数量","收货数量","实收数量","结算数量","对账数量","qty","Qty","quantity","通知收货量","到货量","实际数量"],
+    "数量":      ["到货量","数量","收货数量","实收数量","结算数量","对账数量","qty","Qty","quantity","通知收货量","实际数量"],
     "行金额":    ["行金额","金额","小计","价税合计","含税金额","line_amount","amount","总价","合价","价格小计"],
     "单据总额":  ["单据总额","总额","合计","发票金额","total","Total","月结金额","对账总额","合计金额","总金额"],
 }
 
-# 对账单的单价列（供应商对账单里的单价）
-STMT_PRICE_KW = ["单价","含税单价","结算单价","price","Price","unit_price"]
-
 SUMMARY_KW = ["合计","汇总","小计","总计","合计（大写）","grand total","subtotal","合计:","合计："]
 
 
-# ══════════════════════════════════════════════════════
-#  任务入口
-# ══════════════════════════════════════════════════════
 def run(task_id: str, file_paths: dict, result_dir: str):
     db: Session = SessionLocal()
     try:
@@ -74,9 +70,6 @@ def run(task_id: str, file_paths: dict, result_dir: str):
         db.close()
 
 
-# ══════════════════════════════════════════════════════
-#  智能读取：自动找表头行，跳过干扰行
-# ══════════════════════════════════════════════════════
 def _find_header_row(all_rows: list, needed_keys: list) -> int:
     best_idx, best_score = 0, 0
     for ri, row in enumerate(all_rows[:40]):
@@ -121,13 +114,11 @@ def _smart_read(path: str, needed_keys: list) -> pd.DataFrame:
     if not all_rows:
         raise ValueError(f"文件为空：{os.path.basename(path)}")
     hi = _find_header_row(all_rows, needed_keys)
-    df = pd.read_excel(path, engine="openpyxl" if ext in (".xlsx",".xlsm") else "xlrd", header=hi)
+    engine = "openpyxl" if ext in (".xlsx", ".xlsm") else "xlrd"
+    df = pd.read_excel(path, engine=engine, header=hi)
     return _clean_df(df)
 
 
-# ══════════════════════════════════════════════════════
-#  列名归一化（采购单特殊处理：含税单价和单价分开保留）
-# ══════════════════════════════════════════════════════
 def _normalize_cols(df: pd.DataFrame, targets: list) -> pd.DataFrame:
     rename, used = {}, set()
     for col in df.columns:
@@ -142,14 +133,28 @@ def _normalize_cols(df: pd.DataFrame, targets: list) -> pd.DataFrame:
     return df.rename(columns=rename)
 
 
+def _normalize_po_price_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """采购单专用：含税单价和单价分别识别"""
+    rename = {}
+    tax_col = plain_col = None
+    for col in df.columns:
+        col_s = str(col).strip()
+        if tax_col is None and any(kw in col_s for kw in COL_KEYWORDS["含税单价"]):
+            tax_col = col
+            rename[col] = "含税单价"
+        elif plain_col is None and col != tax_col and any(kw in col_s for kw in COL_KEYWORDS["单价"]):
+            plain_col = col
+            rename[col] = "单价"
+    return df.rename(columns=rename)
+
+
 def _check_cols(df, required, name):
     missing = [c for c in required if c not in df.columns]
     if missing:
         avail = [c for c in df.columns if not str(c).startswith("Unnamed")]
         raise ValueError(
             f"【{name}】未能识别字段：{missing}\n"
-            f"文件实际列名：{avail}\n"
-            f"请确认文件包含这些信息（支持相近名称自动识别）"
+            f"文件实际列名：{avail}"
         )
 
 
@@ -158,14 +163,14 @@ def _to_float(v):
         if v is None or (isinstance(v, float) and np.isnan(v)):
             return None
         s = str(v).replace(",", "").replace("¥", "").replace("￥", "").strip()
-        if s == "" or s.lower() == "nan":
+        if s == "" or s.lower() in ("nan", "none", "-"):
             return None
         return float(s)
     except Exception:
         return None
 
 
-def _to_float_default(v, default=0.0):
+def _to_float_d(v, default=0.0):
     r = _to_float(v)
     return r if r is not None else default
 
@@ -181,50 +186,51 @@ def _to_str(v):
     return str(v).strip()
 
 
-# ══════════════════════════════════════════════════════
-#  核心：获取采购单某一行的有效单价
-#  优先用含税单价（若有值且>0），否则用单价
-# ══════════════════════════════════════════════════════
 def _get_po_price(prow) -> tuple:
-    """
-    返回 (有效单价, 价格来源说明)
-    prow: 采购单某一行的 Series
-    """
-    tax_price  = _to_float(prow.get("含税单价")) if "含税单价" in prow.index else None
-    plain_price= _to_float(prow.get("单价"))     if "单价"    in prow.index else None
-
-    if tax_price is not None and tax_price > 0:
-        return tax_price, "含税单价"
-    if plain_price is not None and plain_price > 0:
-        return plain_price, "单价"
+    """含税单价有值优先，否则用单价"""
+    tax   = _to_float(prow.get("含税单价")) if "含税单价" in prow.index else None
+    plain = _to_float(prow.get("单价"))     if "单价"    in prow.index else None
+    if tax is not None and tax > 0:
+        return tax, "含税单价"
+    if plain is not None and plain > 0:
+        return plain, "单价"
     return None, "未找到"
 
 
-# ══════════════════════════════════════════════════════
-#  主对账逻辑
-# ══════════════════════════════════════════════════════
-def _reconcile(task_id, file_paths, result_dir, task_name):
+def _ffill_po_no(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    关键修复：采购单合并单元格导致采购单号出现NaN
+    用 forward fill 向下填充，让每一行都有采购单号
+    """
+    if "采购单号" in df.columns:
+        df["采购单号"] = df["采购单号"].replace("", np.nan)
+        df["采购单号"] = df["采购单号"].ffill()
+    return df
 
-    # 采购单：需要识别"含税单价"和"单价"两列，分开映射
+
+def _reconcile(task_id, file_paths, result_dir, task_name):
+    # 读取
     po_df   = _smart_read(file_paths["po"],   ["采购单号", "品名", "含税单价", "单价"])
     recv_df = _smart_read(file_paths["recv"], ["采购单号", "品名", "数量"])
     stmt_df = _smart_read(file_paths["stmt"], ["采购单号", "品名", "数量", "单价", "行金额"])
 
-    # 采购单：同时尝试识别含税单价和单价两列（用专门的映射顺序）
+    # 列名归一化
     po_df   = _normalize_po_price_cols(po_df)
-    po_df   = _normalize_cols(po_df, ["采购单号", "品名"])  # 再归一化其他字段
-
+    po_df   = _normalize_cols(po_df,   ["采购单号", "品名"])
     recv_df = _normalize_cols(recv_df, ["采购单号", "品名", "数量"])
     stmt_df = _normalize_cols(stmt_df, ["采购单号", "品名", "数量", "单价", "行金额", "单据总额"])
 
+    # ── 核心修复：采购单合并单元格向下填充 ────────────
+    po_df = _ffill_po_no(po_df)
+
     # 检查必需字段
     if "含税单价" not in po_df.columns and "单价" not in po_df.columns:
-        raise ValueError("【采购订单表】未找到单价信息，需包含「含税单价」或「单价」列")
+        raise ValueError("【采购订单表】未找到单价，需包含「含税单价」或「单价」列")
     _check_cols(po_df,   ["采购单号", "品名"],                           "采购订单表")
     _check_cols(recv_df, ["采购单号", "品名", "数量"],                   "收货单表")
     _check_cols(stmt_df, ["采购单号", "品名", "数量", "单价", "行金额"], "电子对账单")
 
-    # 清洗
+    # 清洗字符串
     for df in (po_df, recv_df, stmt_df):
         df["采购单号"] = df["采购单号"].apply(_to_str)
         df["品名"]     = df["品名"].apply(_to_str)
@@ -248,14 +254,13 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
         if len(recv_rows) != len(stmt_rows):
             for _, srow in stmt_rows.iterrows():
                 total_rows += 1; anomalies += 1
-                amt = _to_float_default(srow.get("行金额", 0))
-                anomaly_amt += amt
+                amt = _to_float_d(srow.get("行金额", 0)); anomaly_amt += amt
                 details.append({
                     "po_no": po_no, "item": _to_str(srow.get("品名","")),
                     "check_type": "行数异常", "recv_qty": None,
-                    "stmt_qty": _to_float_default(srow.get("数量",0)),
+                    "stmt_qty": _to_float_d(srow.get("数量",0)),
                     "po_price": None, "po_price_src": "—",
-                    "stmt_price": _to_float_default(srow.get("单价",0)),
+                    "stmt_price": _to_float_d(srow.get("单价",0)),
                     "line_amt": amt, "anomaly": True,
                     "note": f"收货单{len(recv_rows)}行 vs 对账单{len(stmt_rows)}行，行数不一致"
                 })
@@ -266,37 +271,28 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
         for _, srow in stmt_rows.iterrows():
             total_rows += 1
             item    = _to_str(srow.get("品名", ""))
-            amt     = _to_float_default(srow.get("行金额", 0))
-            s_qty   = _to_float_default(srow.get("数量", 0))
-            s_price = _to_float_default(srow.get("单价", 0))
+            amt     = _to_float_d(srow.get("行金额", 0))
+            s_qty   = _to_float_d(srow.get("数量", 0))
+            s_price = _to_float_d(srow.get("单价", 0))
 
             rrow = recv_rows[recv_rows["品名"].apply(_to_str) == item]
             prow = po_df[(po_df["采购单号"].apply(_to_str) == po_no) &
                          (po_df["品名"].apply(_to_str) == item)]
 
             r_qty = _to_float(rrow["数量"].values[0]) if len(rrow) else None
-
-            # ── 含税/不含税单价优先逻辑 ──────────────────
-            if len(prow) > 0:
-                p_price, price_src = _get_po_price(prow.iloc[0])
-            else:
-                p_price, price_src = None, "未找到"
+            p_price, price_src = (_get_po_price(prow.iloc[0]) if len(prow) > 0 else (None, "未找到"))
 
             errors = []; is_anomaly = False
 
-            # 数量校验
             if r_qty is None:
                 errors.append("收货单未找到品名[" + item + "]"); is_anomaly = True
             elif abs(r_qty - s_qty) > 0.001:
                 errors.append(f"数量差异：收货单{r_qty} vs 对账单{s_qty}"); is_anomaly = True
 
-            # 单价校验
             if p_price is None:
-                errors.append("采购单未找到品名[" + item + "]的单价"); is_anomaly = True
+                errors.append("采购单未找到品名[" + item + "]"); is_anomaly = True
             elif abs(p_price - s_price) > 0.001:
-                errors.append(
-                    f"单价差异（按{price_src}）：采购单¥{p_price} vs 对账单¥{s_price}"
-                ); is_anomaly = True
+                errors.append(f"单价差异（{price_src}）：采购¥{p_price} vs 对账¥{s_price}"); is_anomaly = True
 
             if is_anomaly:
                 anomalies += 1; anomaly_amt += amt; po_all_ok = False
@@ -313,7 +309,7 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
 
         # 校验3 — 总额
         if po_all_ok and has_total:
-            calc_total = sum(_to_float_default(r.get("行金额", 0)) for _, r in stmt_rows.iterrows())
+            calc_total = sum(_to_float_d(r.get("行金额",0)) for _, r in stmt_rows.iterrows())
             stmt_total = _to_float(_to_str(stmt_rows["单据总额"].values[0])) if len(stmt_rows) else None
             if stmt_total and abs(calc_total - stmt_total) > 0.01:
                 anomalies += 1; anomaly_amt += abs(calc_total - stmt_total)
@@ -336,41 +332,13 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
     }, result_path
 
 
-def _normalize_po_price_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    采购单专用：把列名分别映射到「含税单价」和「单价」，两列都保留。
-    含税单价关键字优先匹配，剩余单价关键字再匹配「单价」。
-    """
-    rename = {}
-    tax_col   = None  # 含税单价对应的原列名
-    plain_col = None  # 单价对应的原列名
-
-    for col in df.columns:
-        col_s = str(col).strip()
-        # 优先匹配含税单价
-        if tax_col is None and any(kw in col_s for kw in COL_KEYWORDS["含税单价"]):
-            tax_col = col
-            rename[col] = "含税单价"
-        # 再匹配普通单价（排除已被识别为含税单价的列）
-        elif plain_col is None and col != tax_col and any(kw in col_s for kw in COL_KEYWORDS["单价"]):
-            plain_col = col
-            rename[col] = "单价"
-
-    return df.rename(columns=rename)
-
-
-# ══════════════════════════════════════════════════════
-#  生成结果 Excel
-# ══════════════════════════════════════════════════════
 def _write_excel(path, task_name, details, po_df, recv_df, stmt_df):
     wb = Workbook()
     ws = wb.active
     ws.title = "对账明细（含批注）"
-
     headers    = ["采购单号","品名","校验结果","收货单数量","对账单数量",
                   "采购单单价","单价来源","对账单单价","行金额","异常说明","状态"]
-    col_widths = [16, 20, 16, 12, 12, 12, 10, 12, 12, 40, 10]
-
+    col_widths = [16, 22, 16, 12, 12, 12, 10, 12, 12, 42, 10]
     for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
         c = ws.cell(row=1, column=ci, value=h)
         c.fill = HEAD_FILL; c.font = HEAD_FONT
@@ -384,8 +352,7 @@ def _write_excel(path, task_name, details, po_df, recv_df, stmt_df):
             d["po_no"], d["item"], d["check_type"],
             d["recv_qty"], d["stmt_qty"],
             d["po_price"], d.get("po_price_src","—"), d["stmt_price"],
-            d["line_amt"], d["note"],
-            "⚠ 异常" if d["anomaly"] else "✅ 通过"
+            d["line_amt"], d["note"], "⚠ 异常" if d["anomaly"] else "✅ 通过"
         ]
         for ci, val in enumerate(row_data, 1):
             c = ws.cell(row=ri, column=ci, value=val)
@@ -400,7 +367,6 @@ def _write_excel(path, task_name, details, po_df, recv_df, stmt_df):
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:K{len(details)+1}"
 
-    # 汇总报告
     ws2 = wb.create_sheet("汇总报告")
     total = len(details); anom = sum(1 for d in details if d["anomaly"])
     anom_amt = sum(d["line_amt"] or 0 for d in details if d["anomaly"])
@@ -420,7 +386,6 @@ def _write_excel(path, task_name, details, po_df, recv_df, stmt_df):
             va.font = Font(bold=True, color="CC0000" if anom>0 else "006400")
             va.fill = RED_FILL if anom>0 else GREEN_FILL
 
-    # 原始数据预览
     for sname, df in [("采购订单_原始",po_df),("收货单_原始",recv_df),("对账单_原始",stmt_df)]:
         wsr = wb.create_sheet(sname)
         for ci, col in enumerate(df.columns, 1):

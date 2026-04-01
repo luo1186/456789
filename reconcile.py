@@ -91,121 +91,23 @@ def _clean_po_no(v) -> str:
     return m.group(1) if m else s
 
 def _clean_sku(v) -> str:
-    return _to_str(v)
+    """
+    SKU清洗：
+    - 去掉Excel自动添加的 .0 后缀（如 2414.0 → 2414）
+    - 保留前导零（如 0212.0 → 0212，而非 212）
+    - 保留字母数字混合格式（如 CP196 不变）
+    """
+    if v is None: return ""
+    try:
+        import numpy as np
+        if isinstance(v, float) and np.isnan(v): return ""
+    except: pass
+    s = str(v).strip()
+    if s in ("", "nan", "None"): return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
 
-def _is_junk_row(row) -> bool:
-    """判断是否为合计行或尾部说明行"""
-    vals = [str(v).strip() for v in row if str(v).strip() not in ("","nan","None")]
-    if not vals: return True
-    if any(any(kw in v for kw in SUMMARY_KW) for v in vals): return True
-    first = vals[0]
-    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in first)
-    has_po      = bool(re.match(r'[A-Za-z]+[0-9]', first))
-    has_date    = bool(re.match(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', first))
-    has_invoice = bool(re.match(r'[A-Z]{2}[0-9]+', first))
-    if has_chinese and not has_po and not has_date and not has_invoice:
-        return True
-    return False
-
-def _find_header_row(all_rows: list, needed_keys: list) -> int:
-    best_idx, best_score = 0, 0
-    for ri, row in enumerate(all_rows[:40]):
-        row_text = " ".join([str(v) for v in row])
-        score = sum(1 for t in needed_keys if any(kw in row_text for kw in COL_KEYWORDS.get(t,[t])))
-        if score > best_score: best_score, best_idx = score, ri
-    if best_idx+1 < len(all_rows) and all_rows[best_idx][:5] == all_rows[best_idx+1][:5]:
-        best_idx += 1
-    return best_idx
-
-def _smart_read(path: str, needed_keys: list) -> pd.DataFrame:
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".csv":
-        for enc in ("utf-8-sig","gbk","utf-8"):
-            try:
-                raw = pd.read_csv(path, encoding=enc, header=None, dtype=str)
-                hi  = _find_header_row(raw.fillna("").values.tolist(), needed_keys)
-                df  = pd.read_csv(path, encoding=enc, header=hi, dtype=str)
-                return _clean_frame(df)
-            except UnicodeDecodeError: continue
-        raise ValueError(f"CSV编码识别失败：{os.path.basename(path)}")
-
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    all_rows = [[str(v).strip() if v is not None else "" for v in row]
-                for row in ws.iter_rows(values_only=True)]
-    wb.close()
-    if not all_rows: raise ValueError(f"文件为空：{os.path.basename(path)}")
-    hi = _find_header_row(all_rows, needed_keys)
-    engine = "openpyxl" if ext in (".xlsx",".xlsm") else "xlrd"
-    df = pd.read_excel(path, engine=engine, header=hi)
-    return _clean_frame(df)
-
-def _clean_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """清洗DataFrame：规范列名，过滤空行/合计行/说明行，重置索引"""
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    # 过滤全空行
-    df = df.dropna(how="all")
-    # 过滤合计/说明行
-    junk_mask = df.apply(lambda row: _is_junk_row(list(row)), axis=1)
-    df = df[~junk_mask]
-    # ★ 关键：重置索引，确保连续
-    df = df.reset_index(drop=True)
-    # 删除全空的 Unnamed 列
-    unnamed = [c for c in df.columns if str(c).startswith("Unnamed") and df[c].isna().all()]
-    df = df.drop(columns=unnamed)
-    return df
-
-def _normalize_cols(df: pd.DataFrame, targets: list) -> pd.DataFrame:
-    rename, used = {}, set()
-    # 第一轮：完全匹配（列名本身就是目标字段名或关键字的第一个）
-    for col in df.columns:
-        col_s = str(col).strip()
-        for t in targets:
-            if t in used: continue
-            kws = COL_KEYWORDS.get(t, [t])
-            # 完全相等优先
-            if col_s == kws[0] or col_s == t:
-                rename[col] = t; used.add(t); break
-    # 第二轮：模糊包含匹配（剩余未匹配的列）
-    for col in df.columns:
-        if col in rename: continue
-        col_s = str(col).strip()
-        for t in targets:
-            if t in used: continue
-            if any(kw in col_s for kw in COL_KEYWORDS.get(t,[t])):
-                rename[col] = t; used.add(t); break
-    df = df.rename(columns=rename)
-    # 修复重复列名：如果归一化后出现同名列，给重复的加后缀避免pandas赋值报错
-    cols = list(df.columns)
-    seen = {}
-    new_cols = []
-    for c in cols:
-        if c in seen:
-            seen[c] += 1
-            new_cols.append(f"{c}_{seen[c]}")
-        else:
-            seen[c] = 0
-            new_cols.append(c)
-    df.columns = new_cols
-    return df
-
-def _normalize_po_price_cols(df: pd.DataFrame) -> pd.DataFrame:
-    rename = {}
-    tax_col = plain_col = None
-    for col in df.columns:
-        col_s = str(col).strip()
-        if tax_col is None and any(kw in col_s for kw in COL_KEYWORDS["含税单价"]):
-            tax_col = col; rename[col] = "含税单价"
-        elif plain_col is None and col != tax_col and any(kw in col_s for kw in COL_KEYWORDS["单价"]):
-            plain_col = col; rename[col] = "单价"
-    return df.rename(columns=rename)
-
-def _check_cols(df, required, name):
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        avail = [c for c in df.columns if not str(c).startswith("Unnamed")]
-        raise ValueError(f"【{name}】未能识别字段：{missing}\n文件实际列名：{avail}")
 
 def _get_po_price(prow) -> tuple:
     tax   = _to_float(prow.get("含税单价")) if "含税单价" in prow.index else None

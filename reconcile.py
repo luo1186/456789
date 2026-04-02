@@ -252,98 +252,146 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
     anomaly_amt = 0.0
     total_rows  = 0
 
-    # ── 按 采购单号+SKU 分组处理 ─────────────────────────
-    stmt_groups = stmt_df.groupby(["采购单号","SKU"], sort=False)
+    # ── 按对账单原始行顺序逐行处理（不用groupby，保留原始顺序）─
+    # recv_cursor：记录每个 采购单号+SKU 在收货单里已消耗到第几行
+    recv_cursor = {}  # key: (po_no, sku) → 下一个可用的收货单行索引
 
-    for (po_no, sku), stmt_group in stmt_groups:
-        # 该组的收货单行（保持原始顺序，依次消耗）
-        recv_rows = recv_df[
-            (recv_df["采购单号"]==po_no) & (recv_df["SKU"]==sku)
-        ].reset_index(drop=True)
+    # 先预建收货单索引，按 采购单号+SKU 分组，保持收货单原始顺序
+    recv_index_raw = {}  # key: (po_no, sku) → list of row Series（原始顺序）
+    for _, rrow in recv_df.iterrows():
+        key = (_to_str(rrow.get("采购单号","")), _to_str(rrow.get("SKU","")))
+        if key not in recv_index_raw:
+            recv_index_raw[key] = []
+        recv_index_raw[key].append(rrow)
 
-        # 该组的采购单价
+    # 按对账单里该组的数量顺序，重新排列收货单行
+    # 对账单各组的数量顺序
+    stmt_qty_order = {}  # key: (po_no, sku) → list of 数量（对账单顺序）
+    for _, srow in stmt_df.iterrows():
+        key = (_to_str(srow.get("采购单号","")), _to_str(srow.get("SKU","")))
+        if key not in stmt_qty_order:
+            stmt_qty_order[key] = []
+        stmt_qty_order[key].append(_to_float_d(srow.get("数量", 0)))
+
+    recv_index = {}
+    for key, recv_rows in recv_index_raw.items():
+        stmt_qtys = stmt_qty_order.get(key, [])
+        if len(recv_rows) != len(stmt_qtys):
+            # 行数不一致时保持原始顺序（后续行数校验会报错）
+            recv_index[key] = recv_rows
+            continue
+        # 按对账单数量顺序重新排列收货单行
+        recv_remaining = list(recv_rows)
+        reordered = []
+        for sq in stmt_qtys:
+            # 找收货单中数量最接近 sq 的未使用行
+            best_i = None
+            best_diff = float("inf")
+            for i, rrow in enumerate(recv_remaining):
+                rq = _to_float_d(rrow.get("数量", 0))
+                diff = abs(rq - sq)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_i = i
+            if best_i is not None:
+                reordered.append(recv_remaining.pop(best_i))
+        # 如果有剩余（理论上不会，因为行数相等）
+        reordered.extend(recv_remaining)
+        recv_index[key] = reordered
+
+    # 先做行数预校验：每个 采购单号+SKU 的收货单行数 vs 对账单行数
+    stmt_count = {}
+    for _, srow in stmt_df.iterrows():
+        key = (_to_str(srow.get("采购单号","")), _to_str(srow.get("SKU","")))
+        stmt_count[key] = stmt_count.get(key, 0) + 1
+
+    row_count_anomaly = set()  # 记录行数异常的key，跳过后续比对
+    for key, s_cnt in stmt_count.items():
+        r_cnt = len(recv_index.get(key, []))
+        if r_cnt != s_cnt:
+            row_count_anomaly.add(key)
+
+    # 按对账单原始行顺序逐行处理
+    for _, srow in stmt_df.iterrows():
+        po_no  = _to_str(srow.get("采购单号",""))
+        sku    = _to_str(srow.get("SKU",""))
+        item   = _to_str(srow.get("品名",""))
+        s_qty  = _to_float_d(srow.get("数量",0))
+        s_price= _to_float_d(srow.get("单价",0))
+        s_amt  = _to_float_d(srow.get("行金额",0))
+        key    = (po_no, sku)
+
+        if not po_no or not sku:
+            continue
+        total_rows += 1
+
+        # 获取该组采购单价
         prow = po_df[(po_df["采购单号"]==po_no) & (po_df["SKU"]==sku)]
         p_price, price_src = (_get_po_price(prow.iloc[0]) if len(prow)>0 else (None,"未找到"))
 
-        stmt_rows = stmt_group.reset_index(drop=True)
-        n_stmt    = len(stmt_rows)
-        n_recv    = len(recv_rows)
-
-        # 校验1 — 行数不一致
-        if n_recv != n_stmt:
-            for _, srow in stmt_rows.iterrows():
-                total_rows += 1
-                anomalies  += 1
-                s_amt = _to_float_d(srow.get("行金额",0))
-                anomaly_amt += s_amt
-                details.append({
-                    "po_no": po_no, "sku": sku,
-                    "item":  _to_str(srow.get("品名","")),
-                    "check_type": "行数异常",
-                    "recv_qty": None, "stmt_qty": _to_float_d(srow.get("数量",0)),
-                    "po_price": p_price, "po_price_src": price_src,
-                    "stmt_price": _to_float_d(srow.get("单价",0)),
-                    "calc_amt": None, "stmt_amt": s_amt,
-                    "anomaly": True,
-                    "note": f"收货单{n_recv}行 vs 对账单{n_stmt}行，行数不一致"
-                })
-            continue
-
-        # 校验2 — 按行比对（对账单顺序不动，收货单依次消耗）
-        recv_used = [False] * n_recv  # 标记收货单行是否已被使用
-
-        for si, srow in stmt_rows.iterrows():
-            total_rows += 1
-            item     = _to_str(srow.get("品名",""))
-            s_qty    = _to_float_d(srow.get("数量",0))
-            s_price  = _to_float_d(srow.get("单价",0))
-            s_amt    = _to_float_d(srow.get("行金额",0))
-
-            # 找收货单中第一条未使用的行（按顺序消耗）
-            r_idx = next((i for i,used in enumerate(recv_used) if not used), None)
-            if r_idx is not None:
-                recv_used[r_idx] = True
-                r_qty = _to_float_d(recv_rows.iloc[r_idx].get("数量",0))
-            else:
-                r_qty = None
-
-            errors = []; is_anomaly = False
-
-            # 数量校验（收货单为准）
-            if r_qty is None:
-                errors.append("收货单未找到对应行"); is_anomaly = True
-            elif abs(r_qty - s_qty) > 0.001:
-                errors.append(f"数量差异：收货单{r_qty} vs 对账单{s_qty}"); is_anomaly = True
-
-            # 单价校验（采购单为准）
-            if p_price is None:
-                errors.append(f"采购单未找到 采购单号[{po_no}]+SKU[{sku}]"); is_anomaly = True
-            elif abs(p_price - s_price) > 0.001:
-                errors.append(f"单价差异（{price_src}）：采购¥{p_price} vs 对账¥{s_price}"); is_anomaly = True
-
-            # 行金额校验：系统计算 = 收货单数量 × 采购单单价
-            if r_qty is not None and p_price is not None:
-                calc_amt = round(r_qty * p_price, 2)
-                if abs(calc_amt - s_amt) > 0.01:
-                    errors.append(f"行金额差异：系统计算¥{calc_amt} vs 对账单¥{s_amt}")
-                    is_anomaly = True
-            else:
-                calc_amt = None
-
-            if is_anomaly:
-                anomalies += 1
-                anomaly_amt += s_amt
-
+        # 行数异常：整组报异常，不做明细比对
+        if key in row_count_anomaly:
+            r_cnt = len(recv_index.get(key, []))
+            s_cnt = stmt_count[key]
+            anomalies  += 1
+            anomaly_amt += s_amt
             details.append({
                 "po_no": po_no, "sku": sku, "item": item,
-                "check_type": "、".join(errors) if errors else "通过",
-                "recv_qty": r_qty, "stmt_qty": s_qty,
+                "check_type": "行数异常",
+                "recv_qty": None, "stmt_qty": s_qty,
                 "po_price": p_price, "po_price_src": price_src,
-                "stmt_price": s_price,
-                "calc_amt": calc_amt, "stmt_amt": s_amt,
-                "anomaly": is_anomaly,
-                "note": "；".join(errors) if errors else "—"
+                "stmt_price": s_price, "calc_amt": None, "stmt_amt": s_amt,
+                "anomaly": True,
+                "note": f"收货单{r_cnt}行 vs 对账单{s_cnt}行，行数不一致"
             })
+            continue
+
+        # 按顺序取下一条收货单记录（依次消耗）
+        cursor = recv_cursor.get(key, 0)
+        recv_list = recv_index.get(key, [])
+        if cursor < len(recv_list):
+            recv_cursor[key] = cursor + 1
+            r_qty = _to_float_d(recv_list[cursor].get("数量", 0))
+        else:
+            r_qty = None
+
+        errors = []; is_anomaly = False
+
+        # 数量校验（收货单为准）
+        if r_qty is None:
+            errors.append("收货单未找到对应行"); is_anomaly = True
+        elif abs(r_qty - s_qty) > 0.001:
+            errors.append(f"数量差异：收货单{r_qty} vs 对账单{s_qty}"); is_anomaly = True
+
+        # 单价校验（采购单为准）
+        if p_price is None:
+            errors.append(f"采购单未找到 采购单号[{po_no}]+SKU[{sku}]"); is_anomaly = True
+        elif abs(p_price - s_price) > 0.001:
+            errors.append(f"单价差异（{price_src}）：采购¥{p_price} vs 对账¥{s_price}"); is_anomaly = True
+
+        # 行金额校验：系统计算 = 收货单数量 × 采购单单价
+        if r_qty is not None and p_price is not None:
+            calc_amt = round(r_qty * p_price, 2)
+            if abs(calc_amt - s_amt) > 0.01:
+                errors.append(f"行金额差异：系统计算¥{calc_amt} vs 对账单¥{s_amt}")
+                is_anomaly = True
+        else:
+            calc_amt = None
+
+        if is_anomaly:
+            anomalies += 1
+            anomaly_amt += s_amt
+
+        details.append({
+            "po_no": po_no, "sku": sku, "item": item,
+            "check_type": "、".join(errors) if errors else "通过",
+            "recv_qty": r_qty, "stmt_qty": s_qty,
+            "po_price": p_price, "po_price_src": price_src,
+            "stmt_price": s_price,
+            "calc_amt": calc_amt, "stmt_amt": s_amt,
+            "anomaly": is_anomaly,
+            "note": "；".join(errors) if errors else "—"
+        })
 
     # ── 总额校验 ─────────────────────────────────────────
     if has_total:

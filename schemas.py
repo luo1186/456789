@@ -27,6 +27,7 @@ class TaskOut(BaseModel):
     finished_at: Optional[str]
     result_summary: Optional[Any]
     has_result: bool
+    error_msg: Optional[str]
 
 class CreateUserRequest(BaseModel):
     username: str

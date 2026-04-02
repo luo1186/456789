@@ -193,6 +193,15 @@ def _get_task_or_404(task_id, db, current):
 
 def _task_out(task, user):
     import json
+    # 提取用户友好的错误信息（取第一行有意义的内容）
+    error_msg = None
+    if task.error_msg:
+        lines = task.error_msg.strip().split('\n')
+        friendly = next((l.strip() for l in lines if l.strip()
+                        and not l.strip().startswith('File ')
+                        and not l.strip().startswith('Traceback')
+                        and not l.strip().startswith('During')), None)
+        error_msg = task.error_msg  # 完整错误，前端自己处理展示
     return schemas.TaskOut(
         id=task.id,
         name=task.name,
@@ -202,5 +211,6 @@ def _task_out(task, user):
         created_at=str(task.created_at)[:16] if task.created_at else "",
         finished_at=str(task.finished_at)[:16] if task.finished_at else None,
         result_summary=json.loads(task.result_summary) if task.result_summary else None,
-        has_result=bool(task.result_path and os.path.exists(task.result_path))
+        has_result=bool(task.result_path and os.path.exists(task.result_path)),
+        error_msg=error_msg
     )

@@ -133,6 +133,7 @@ td{padding:12px 16px;font-size:13px;vertical-align:middle}
     <div class="topbar-view" id="topbarView">个人工作台</div>
     <div class="topbar-right">
       <button class="view-toggle" id="switchViewBtn" onclick="switchView()" style="display:none"></button>
+      <button class="view-toggle" id="userMgrBtn" onclick="renderUserManagement()" style="display:none">👤 用户管理</button>
       <div class="topbar-user">
         <div class="avatar" id="topbarAvatar">?</div>
         <span id="topbarName"></span>
@@ -256,11 +257,14 @@ function updateTopbar() {
   document.getElementById('topbarAvatar').textContent = currentUser.display_name[0];
   document.getElementById('topbarView').textContent = currentView === 'admin' ? '管理员视图' : '个人工作台';
   const btn = document.getElementById('switchViewBtn');
+  const umBtn = document.getElementById('userMgrBtn');
   if (currentUser.role === 'admin') {
     btn.style.display = 'block';
     btn.textContent = currentView === 'admin' ? '切换至个人视图' : '切换至管理员视图';
+    umBtn.style.display = 'block';
   } else {
     btn.style.display = 'none';
+    umBtn.style.display = 'none';
   }
 }
 
@@ -717,6 +721,178 @@ function showToast(msg, type='info') {
 // ══════════════════════════════════════════════════════
 //  START
 // ══════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════
+//  用户管理页面
+// ══════════════════════════════════════════════════════
+async function renderUserManagement() {
+  stopPoll();
+  const el = document.getElementById('mainContent');
+  el.innerHTML = '<div class="page-loader"><span class="loader"></span> 加载中…</div>';
+  document.getElementById('topbarView').textContent = '用户管理';
+
+  let users;
+  try { users = await req('GET', '/api/users'); }
+  catch(e) { showToast(e.message, 'error'); return; }
+
+  el.innerHTML = `
+    <div class="fade-in">
+      <div class="section-header">
+        <div class="section-title">👤 用户管理</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-secondary btn-sm" onclick="renderCurrentView()">← 返回</button>
+          <button class="btn btn-primary btn-sm" onclick="openAddUserModal()">＋ 新增用户</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-header">
+          <div class="table-title">账号列表</div>
+          <span style="font-size:11px;color:var(--text3)">${users.length} 个账号</span>
+        </div>
+        <table>
+          <thead><tr>
+            <th>用户名</th><th>显示名称</th><th>角色</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            ${users.map(u => `
+              <tr>
+                <td style="font-family:var(--mono);font-size:12px">${u.username}</td>
+                <td style="font-weight:500">${u.display_name}</td>
+                <td>
+                  ${u.role === 'admin'
+                    ? '<span style="background:rgba(99,102,241,.2);color:#a5b4fc;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">管理员</span>'
+                    : '<span style="background:var(--accent-glow);color:#93c5fd;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">采购专员</span>'}
+                </td>
+                <td>
+                  <div class="action-group">
+                    <button class="btn btn-secondary btn-sm" onclick="openResetPwdModal(${u.id},'${u.display_name}')">重置密码</button>
+                    ${u.id !== currentUser.id
+                      ? `<button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id},'${u.display_name}')">删除</button>`
+                      : '<span style="font-size:11px;color:var(--text3)">（当前账号）</span>'}
+                  </div>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function openAddUserModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'addUserModal';
+  overlay.innerHTML = `
+    <div class="modal" style="width:440px">
+      <div class="modal-header">
+        <div class="modal-title">＋ 新增用户</div>
+        <button class="btn btn-ghost btn-icon" onclick="closeModal('addUserModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">用户名（登录用）</label>
+          <input class="form-input" id="newUsername" placeholder="例如：wangwu">
+        </div>
+        <div class="form-group">
+          <label class="form-label">显示名称</label>
+          <input class="form-input" id="newDisplayName" placeholder="例如：王五">
+        </div>
+        <div class="form-group">
+          <label class="form-label">初始密码</label>
+          <input class="form-input" type="password" id="newPassword" placeholder="请设置初始密码">
+        </div>
+        <div class="form-group">
+          <label class="form-label">角色</label>
+          <select class="form-input" id="newRole">
+            <option value="staff">采购专员</option>
+            <option value="admin">管理员</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('addUserModal')">取消</button>
+        <button class="btn btn-primary" onclick="submitAddUser()" id="addUserBtn">创建账号</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if(e.target===overlay) closeModal('addUserModal'); });
+}
+
+async function submitAddUser() {
+  const username    = document.getElementById('newUsername').value.trim();
+  const displayName = document.getElementById('newDisplayName').value.trim();
+  const password    = document.getElementById('newPassword').value.trim();
+  const role        = document.getElementById('newRole').value;
+  if (!username || !displayName || !password) { showToast('请填写所有字段', 'error'); return; }
+  const btn = document.getElementById('addUserBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="loader"></span>';
+  try {
+    await req('POST', '/api/users', { username, display_name: displayName, password, role });
+    closeModal('addUserModal');
+    showToast(`账号「${displayName}」创建成功`, 'success');
+    renderUserManagement();
+  } catch(e) {
+    showToast(e.message, 'error');
+    btn.disabled = false; btn.textContent = '创建账号';
+  }
+}
+
+function openResetPwdModal(userId, displayName) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'resetPwdModal';
+  overlay.innerHTML = `
+    <div class="modal" style="width:400px">
+      <div class="modal-header">
+        <div class="modal-title">重置密码 · ${displayName}</div>
+        <button class="btn btn-ghost btn-icon" onclick="closeModal('resetPwdModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">新密码</label>
+          <input class="form-input" type="password" id="newPwd" placeholder="请输入新密码">
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">确认新密码</label>
+          <input class="form-input" type="password" id="confirmPwd" placeholder="再次输入新密码">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('resetPwdModal')">取消</button>
+        <button class="btn btn-primary" onclick="submitResetPwd(${userId},'${displayName}')" id="resetBtn">确认重置</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if(e.target===overlay) closeModal('resetPwdModal'); });
+}
+
+async function submitResetPwd(userId, displayName) {
+  const pwd1 = document.getElementById('newPwd').value.trim();
+  const pwd2 = document.getElementById('confirmPwd').value.trim();
+  if (!pwd1) { showToast('请输入新密码', 'error'); return; }
+  if (pwd1 !== pwd2) { showToast('两次密码不一致', 'error'); return; }
+  const btn = document.getElementById('resetBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="loader"></span>';
+  try {
+    await req('PATCH', `/api/users/${userId}/password`, { password: pwd1 });
+    closeModal('resetPwdModal');
+    showToast(`「${displayName}」密码已重置`, 'success');
+  } catch(e) {
+    showToast(e.message, 'error');
+    btn.disabled = false; btn.textContent = '确认重置';
+  }
+}
+
+async function deleteUser(userId, displayName) {
+  if (!confirm(`确认删除账号「${displayName}」？此操作不可恢复。`)) return;
+  try {
+    await req('DELETE', `/api/users/${userId}`);
+    showToast(`账号「${displayName}」已删除`, 'success');
+    renderUserManagement();
+  } catch(e) {
+    showToast(e.message, 'error');
+  }
+}
+
 boot();
 </script>
 </body>

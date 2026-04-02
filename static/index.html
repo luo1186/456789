@@ -411,7 +411,7 @@ function renderAdminRows(tasks) {
       <td>${statusBadge(t)}</td>
       <td>${anomalyCell(t)}</td>
       <td style="color:var(--text2);font-family:var(--mono);font-size:12px">${t.created_at}</td>
-      <td><div class="action-group">${actionBtns(t)}</div></td>
+      <td><div class="action-group">${actionBtns(t)}<button class="btn btn-danger btn-sm" onclick="adminDeleteTask('${t.id}','${t.name.replace(/'/g,'')}')">🗑 删除</button></div></td>
     </tr>`).join('');
 }
 
@@ -549,6 +549,17 @@ async function cancelTask(id) {
   try {
     await req('DELETE', `/api/tasks/${id}`);
     showToast('任务已取消', 'info');
+    renderCurrentView();
+  } catch(e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function adminDeleteTask(id, name) {
+  if (!confirm(`确认删除任务「${name}」？\n任务记录和结果文件将一并删除，不可恢复。`)) return;
+  try {
+    await req('DELETE', `/api/tasks/${id}/admin`);
+    showToast(`任务「${name}」已删除`, 'success');
     renderCurrentView();
   } catch(e) {
     showToast(e.message, 'error');

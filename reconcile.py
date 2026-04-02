@@ -237,7 +237,8 @@ def _reconcile(task_id, file_paths, result_dir, task_name):
 
     po_df["采购单号"]   = po_df["采购单号"].apply(_to_str).replace("",np.nan).ffill().apply(_clean_po_no)
     po_df["SKU"]        = po_df["SKU"].apply(_clean_sku)
-    recv_df["采购单号"] = recv_df["采购单号"].apply(_clean_po_no)
+    # 收货单采购单号也可能有合并单元格，同样向下填充
+    recv_df["采购单号"] = recv_df["采购单号"].apply(_to_str).replace("",np.nan).ffill().apply(_clean_po_no)
     recv_df["SKU"]      = recv_df["SKU"].apply(_clean_sku)
     stmt_df["采购单号"] = stmt_df["采购单号"].apply(_clean_po_no)
     stmt_df["SKU"]      = stmt_df["SKU"].apply(_clean_sku)
@@ -506,4 +507,5 @@ def _write_excel(path, task_name, details, po_df, recv_df, stmt_df):
                 wsr.cell(row=ri, column=ci, value=val)
 
     wb.save(path)
+
 

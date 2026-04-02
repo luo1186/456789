@@ -452,7 +452,7 @@ function actionBtns(t) {
   if (t.status === 'processing')
     html += `<span style="font-size:11px;color:var(--yellow);display:flex;align-items:center;gap:4px"><span class="processing-dot"></span>处理中</span>`;
   if (t.status === 'failed')
-    html += `<span style="font-size:11px;color:var(--red)">处理失败</span>`;
+    html += `<button class="btn btn-danger btn-sm" onclick="viewError('${t.id}')" style="font-size:11px">✕ 查看失败原因</button>`;
   return html;
 }
 
@@ -641,6 +641,69 @@ async function downloadResult(taskId, taskName) {
 //  UTILS
 // ══════════════════════════════════════════════════════
 function closeModal(id) { const el = document.getElementById(id); if(el) el.remove(); }
+
+// ══════════════════════════════════════════════════════
+//  查看失败原因
+// ══════════════════════════════════════════════════════
+async function viewError(taskId) {
+  let task;
+  try {
+    const tasks = await req('GET', '/api/tasks');
+    task = tasks.find(t => t.id === taskId);
+  } catch(e) {
+    showToast('获取失败信息出错：' + e.message, 'error');
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'errorModal';
+
+  // 尝试从 error_msg 提取用户友好的错误信息
+  const rawErr = task?.error_msg || '未知错误';
+  // 提取第一行（通常是最关键的错误描述）
+  const firstLine = rawErr.split('\n').find(l => l.trim() && !l.trim().startsWith('File') && !l.trim().startsWith('Traceback')) || rawErr.split('\n')[0];
+
+  overlay.innerHTML = `
+    <div class="modal" style="width:560px">
+      <div class="modal-header">
+        <div class="modal-title" style="color:var(--red)">✕ 任务处理失败</div>
+        <button class="btn btn-ghost btn-icon" onclick="closeModal('errorModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="background:var(--red-bg);border:1px solid rgba(248,81,73,.2);border-radius:var(--radius);padding:14px 16px;margin-bottom:16px">
+          <div style="font-size:12px;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">任务名称</div>
+          <div style="font-weight:500">${task?.name || taskId}</div>
+        </div>
+        <div style="margin-bottom:12px">
+          <div style="font-size:12px;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">失败原因</div>
+          <div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:13px;color:var(--red);line-height:1.8">
+            ${firstLine.replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">常见解决方法</div>
+          <div style="font-size:12px;color:var(--text2);line-height:2">
+            • 确认三个文件的列名包含「采购单号」「SKU」等必需字段<br>
+            • 确认文件格式为 .xlsx / .xls / .csv，不支持 .pdf<br>
+            • 确认文件未加密，可以正常用 Excel 打开<br>
+            • 确认 SKU 列为文本格式，前导零（如 0212）不丢失
+          </div>
+        </div>
+        ${rawErr.length > 50 ? `
+        <details style="margin-top:14px">
+          <summary style="font-size:11px;color:var(--text3);cursor:pointer;user-select:none">查看完整错误日志</summary>
+          <pre style="margin-top:8px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);padding:12px;font-size:11px;font-family:var(--mono);color:var(--text3);overflow-x:auto;white-space:pre-wrap;max-height:200px;overflow-y:auto">${rawErr.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
+        </details>` : ''}
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('errorModal')">关闭</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if(e.target===overlay) closeModal('errorModal'); });
+}
 
 function showToast(msg, type='info') {
   const tc = document.getElementById('toastContainer');

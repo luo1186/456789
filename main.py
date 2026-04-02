@@ -182,6 +182,30 @@ def create_user(body: schemas.CreateUserRequest, db: Session = Depends(get_db), 
     db.refresh(user)
     return user
 
+@app.patch("/api/users/{user_id}/password")
+def reset_password(user_id: int, body: schemas.ResetPasswordRequest, db: Session = Depends(get_db), current=Depends(auth.get_current_user)):
+    if current.role != "admin":
+        raise HTTPException(403, "仅管理员可重置密码")
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    user.password_hash = auth.hash_password(body.password)
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db), current=Depends(auth.get_current_user)):
+    if current.role != "admin":
+        raise HTTPException(403, "仅管理员可删除用户")
+    if user_id == current.id:
+        raise HTTPException(400, "不能删除自己的账号")
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
+
 # ── helpers ───────────────────────────────────────────
 def _get_task_or_404(task_id, db, current):
     task = db.query(models.Task).filter(models.Task.id == task_id).first()

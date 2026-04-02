@@ -113,6 +113,38 @@ def cancel_task(task_id: str, db: Session = Depends(get_db), current=Depends(aut
     db.commit()
     return {"ok": True}
 
+@app.delete("/api/tasks/{task_id}/admin")
+def admin_delete_task(task_id: str, db: Session = Depends(get_db), current=Depends(auth.get_current_user)):
+    """管理员删除任意任务（含结果文件）"""
+    if current.role != "admin":
+        raise HTTPException(403, "仅管理员可删除任务")
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    # 删除结果文件
+    if task.result_path and os.path.exists(task.result_path):
+        try:
+            os.remove(task.result_path)
+        except Exception:
+            pass
+    # 删除上传文件目录
+    if task.file_paths:
+        import json as _json
+        try:
+            paths = _json.loads(task.file_paths)
+            for p in paths.values():
+                if os.path.exists(p):
+                    os.remove(p)
+            # 删除任务目录
+            task_dir = os.path.dirname(list(paths.values())[0])
+            if os.path.isdir(task_dir):
+                os.rmdir(task_dir)
+        except Exception:
+            pass
+    db.delete(task)
+    db.commit()
+    return {"ok": True}
+
 @app.get("/api/tasks/{task_id}/download")
 def download_result(task_id: str, db: Session = Depends(get_db), current=Depends(auth.get_current_user)):
     task = _get_task_or_404(task_id, db, current)

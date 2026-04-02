@@ -34,3 +34,6 @@ class CreateUserRequest(BaseModel):
     display_name: str
     password: str
     role: str = "staff"
+
+class ResetPasswordRequest(BaseModel):
+    password: str
